@@ -1,0 +1,17 @@
+*~
+build
+dist
+docs/source/modules
+*egg-info
+*.egg
+*.log
+*.pyc
+*.tar.*
+_trial_temp
+.tox/
+deluge/i18n/*/
+deluge.pot
+*.desktop
+.build_data*
+osx/app
+RELEASE-VERSION
