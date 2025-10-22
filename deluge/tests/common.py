@@ -1,10 +1,12 @@
 import os
 import sys
 import tempfile
+import traceback
 
 from twisted.internet import defer, protocol, reactor
 from twisted.internet.defer import Deferred
 from twisted.internet.error import CannotListenError
+from twisted.trial import unittest
 
 import deluge.configmanager
 import deluge.core.preferencesmanager
@@ -23,6 +25,18 @@ def set_tmp_config_dir():
     config_directory = tempfile.mkdtemp()
     deluge.configmanager.set_config_dir(config_directory)
     return config_directory
+
+
+def todo_test(caller):
+    # If we are using the delugereporter we can set todo mark on the test
+    # Without the delugereporter the todo would print a stack trace, so in
+    # that case we rely only on skipTest
+    if os.environ.get("DELUGE_REPORTER", None):
+        getattr(caller, caller._testMethodName).im_func.todo = "To be fixed"
+
+    filename = os.path.basename(traceback.extract_stack(None, 2)[0][0])
+    funcname = traceback.extract_stack(None, 2)[0][2]
+    raise unittest.SkipTest("TODO: %s:%s" % (filename, funcname))
 
 
 def add_watchdog(deferred, timeout=0.05, message=None):
@@ -50,7 +64,16 @@ lang.setup_translations()
 
 class ProcessOutputHandler(protocol.ProcessProtocol):
 
-    def __init__(self, callbacks, script, logfile=None, print_stderr=True):
+    def __init__(self, script, callbacks, logfile=None, print_stderr=True):
+        """Executes a script and handle the process' output to stdout and stderr.
+
+        Args:
+            script (str): The script to execute.
+            callbacks (list): Callbacks to trigger if the expected output if found.
+            logfile (str, optional): Filename to wrote the process' output.
+            print_stderr (bool): Print the process' stderr output to stdout.
+
+        """
         self.callbacks = callbacks
         self.script = script
         self.log_output = ""
@@ -72,6 +95,12 @@ class ProcessOutputHandler(protocol.ProcessProtocol):
             f.write(self.log_output)
 
     def kill(self):
+        """Kill the running process.
+
+        Returns:
+            Deferred: A deferred that is triggered when the process has quit.
+
+        """
         if self.killed:
             return
         self.killed = True
@@ -81,8 +110,9 @@ class ProcessOutputHandler(protocol.ProcessProtocol):
         return self.quit_d
 
     def _kill_watchdogs(self):
+        """"Cancel all watchdogs"""
         for w in self.watchdogs:
-            if not w.cancelled:
+            if not w.called and not w.cancelled:
                 w.cancel()
 
     def processEnded(self, status):  # NOQA
@@ -136,6 +166,25 @@ class ProcessOutputHandler(protocol.ProcessProtocol):
 
 def start_core(listen_port=58846, logfile=None, timeout=10, timeout_msg=None,
                custom_script="", print_stderr=True, extra_callbacks=None):
+    """Start the deluge core as a daemon.
+
+    Args:
+        listen_port (int, optional): The port the daemon listens for client connections.
+        logfile (str, optional): Logfile name to write the output from the process.
+        timeout (int): If none of the callbacks have been triggered before the imeout, the process is killed.
+        timeout_msg (str): The message to print when the timeout expires.
+        custom_script (str): Extra python code to insert into the daemon process script.
+        print_stderr (bool): If the output from the process' stderr should be printed to stdout.
+        extra_callbacks (list): A list of dictionaries specifying extra callbacks.
+
+    Returns:
+        tuple(Deferred, ProcessOutputHandler):
+
+        The Deferred is fired when the core callback is triggered either after the default
+        output triggers are matched (daemon successfully started, or failed to start),
+        or upon timeout expiry. The ProcessOutputHandler is the handler for the deluged process.
+
+    """
     config_directory = set_tmp_config_dir()
     daemon_script = """
 import sys
@@ -179,28 +228,27 @@ def start_process(script, callbacks, logfile=None, print_stderr=True):
     Starts an external python process which executes the given script.
 
     Args:
-        script (str): The content of the script to execute
-        callbacks (list): list of dictionaries specifying callbacks
-
-        logfile (str): Optional logfile to write the output from the process
-        print_stderr (bool): If the output from the process' stderr should be printed to stdout
+        script (str): The content of the script to execute.
+        callbacks (list): list of dictionaries specifying callbacks.
+        logfile (str, optional): Logfile name to write the output from the process.
+        print_stderr (bool): If the output from the process' stderr should be printed to stdout.
 
     Returns:
-        ProcessOutputHandler: The handler for the process's output
+        ProcessOutputHandler: The handler for the process's output.
 
     Each entry in the callbacks list is a dictionary with the following keys:
-      * "deferred": The deferred to be called when matched
+      * "deferred": The deferred to be called when matched.
       * "types": The output this callback should be matched against.
                  Possible values: ["stdout", "stderr"]
-      * "timeout" (optional): A timeout in seconds for the deferred
+      * "timeout" (optional): A timeout in seconds for the deferred.
       * "triggers": A list of dictionaries, each specifying specifying a trigger:
-        * "expr": A string to match against the log output
-        * "value": A function to produce the result to be passed to the callback
+        * "expr": A string to match against the log output.
+        * "value": A function to produce the result to be passed to the callback.
         * "type" (optional): A string that specifies wether to trigger a regular callback or errback.
 
     """
     cwd = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    process_protocol = ProcessOutputHandler(callbacks, script, logfile, print_stderr)
+    process_protocol = ProcessOutputHandler(script, callbacks, logfile, print_stderr)
 
     # Add timeouts to deferreds
     for c in callbacks:
